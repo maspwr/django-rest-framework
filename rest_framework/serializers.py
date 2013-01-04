@@ -208,6 +208,11 @@ class BaseSerializer(WritableField):
         Converts a dictionary of data into a dictionary of deserialized fields.
         """
         reverted_data = {}
+
+        if data is not None and not isinstance(data, dict):
+            self._errors['non_field_errors'] = [u'Invalid data']
+            return None
+
         for field_name, field in self.fields.items():
             field.initialize(parent=self, field_name=field_name)
             try:
@@ -279,7 +284,7 @@ class BaseSerializer(WritableField):
         """
         if hasattr(data, '__iter__') and not isinstance(data, dict):
             # TODO: error data when deserializing lists
-            return (self.from_native(item) for item in data)
+            return [self.from_native(item, None) for item in data]
 
         self._errors = {}
         if data is not None or files is not None:
