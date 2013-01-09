@@ -3,6 +3,28 @@ from django.test import TestCase
 from rest_framework import serializers
 
 
+class OneToManyTarget(models.Model):
+    name = models.CharField(max_length=100)
+
+
+class OneToManyTargetSource(models.Model):
+    name = models.CharField(max_length=100)
+    target = models.ForeignKey(OneToManyTarget,
+                               related_name='target_sources')
+
+
+class OneToManySource(models.Model):
+    name = models.CharField(max_length=100)
+    target_source = models.ForeignKey(OneToManyTargetSource,
+                                      related_name='sources')
+
+
+class OneToManySource(models.Model):
+    name = models.CharField(max_length=100)
+    target = models.ForeignKey(OneToManyTarget,
+                               related_name='sources')
+
+
 class OneToOneTarget(models.Model):
     name = models.CharField(max_length=100)
 
@@ -38,6 +60,101 @@ class OneToOneTargetSerializer(serializers.ModelSerializer):
         model = OneToOneTarget
 
 
+class OneToManySourceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OneToManySource
+        exclude = ('target_source', )
+
+
+class OneToManyTargetSourceSerializer(serializers.ModelSerializer):
+    sources = OneToManySourceSerializer()
+
+    class Meta:
+        model = OneToManyTargetSource
+        exclude = ('target', )
+
+
+class OneToManyTargetSerializer(serializers.ModelSerializer):
+    target_sources = OneToManyTargetSourceSerializer()
+
+    class Meta:
+        model = OneToManyTarget
+
+
+class NestedOneToManyTests(TestCase):
+    def setUp(self):
+        target = OneToManyTarget(name='target-1')
+        target.save()
+        target_source = OneToManyTargetSource(name='target-source-1', target=target)
+        target_source.save()
+        for idx in range(1, 4):
+            source = OneToManySource(name='source-%d' % idx, target_source=target_source)
+            source.save()
+
+    def test_one_to_many_retrieve(self):
+        queryset = OneToManyTarget.objects.all()
+        serializer = OneToManyTargetSerializer(queryset)
+        expected = [
+            {'id': 1, 'name': u'target-1', 'target_sources': [{'id': 1, 'name': u'target-source-1', 'sources': [{'id': 1, 'name': u'source-1'}, {'id': 2, 'name': u'source-2'}, {'id': 3, 'name': u'source-3'}]}]}
+        ]
+        self.assertEquals(serializer.data, expected)
+
+    def test_one_to_many_create(self):
+        # Note the nonsensical source id given
+        data = {'id': 2, 'name': u'target-2', 'target_sources': [{'id': 2, 'name': u'target-source-2', 'sources': [{'id': 2, 'name': u'source-4'}]}]}
+        expected = {'id': 2, 'name': u'target-2', 'target_sources': [{'id': 2, 'name': u'target-source-2', 'sources': [{'id': 4, 'name': u'source-4'}]}]}
+        serializer = OneToManyTargetSerializer(data=data)
+        self.assertTrue(serializer.is_valid())
+        obj = serializer.save()
+        self.assertEquals(serializer.data, expected)
+        self.assertEqual(obj.name, u'target-2')
+
+        # Ensure (target 4, target_source 4, source 4) are added, and
+        # everything else is as expected.
+        queryset = OneToManyTarget.objects.all()
+        serializer = OneToManyTargetSerializer(queryset)
+        expected = [
+            {'id': 1, 'name': u'target-1', 'target_sources': [{'id': 1, 'name': u'target-source-1', 'sources': [{'id': 1, 'name': u'source-1'}, {'id': 2, 'name': u'source-2'}, {'id': 3, 'name': u'source-3'}]}]},
+            {'id': 2, 'name': u'target-2', 'target_sources': [{'id': 2, 'name': u'target-source-2', 'sources': [{'id': 4, 'name': u'source-4'}]}]}
+        ]
+        self.assertEquals(serializer.data, expected)
+
+    def test_one_to_many_update(self):
+        data = {'id': 1, 'name': u'target-1-updated', 'target_sources': [{'id': 1, 'name': u'target-source-1-updated', 'sources': [{'id': 1, 'name': u'source-1-updated'}]}]}
+        expected = {'id': 1, 'name': u'target-1-updated', 'target_sources': [{'id': 1, 'name': u'target-source-1-updated', 'sources': [{'id': 1, 'name': u'source-1-updated'}, {'id': 2, 'name': u'source-2'}, {'id': 3, 'name': u'source-3'}]}]}
+        instance = OneToManyTarget.objects.get(pk=1)
+        serializer = OneToManyTargetSerializer(instance, data=data)
+        self.assertTrue(serializer.is_valid())
+        obj = serializer.save()
+        self.assertEquals(serializer.data, expected)
+        self.assertEqual(obj.name, u'target-1-updated')
+
+        # Ensure (target 1, target_source 1, source 1) are updated,
+        # and everything else is as expected.
+        queryset = OneToManyTarget.objects.all()
+        serializer = OneToManyTargetSerializer(queryset)
+        expected = [
+            {'id': 1, 'name': u'target-1-updated', 'target_sources': [{'id': 1, 'name': u'target-source-1-updated', 'sources': [{'id': 1, 'name': u'source-1-updated'}, {'id': 2, 'name': u'source-2'}, {'id': 3, 'name': u'source-3'}]}]}
+            ]
+        self.assertEquals(serializer.data, expected)
+
+    def test_one_to_many_delete(self):
+        data = {'id': 1, 'name': u'target-1', 'target_sources': [{'id': 1, 'name': u'target-source-1', 'sources': [{'_delete': True, 'id': 3, 'name': u'source-3'}]}]}
+        instance = OneToManyTarget.objects.get(pk=1)
+        serializer = OneToManyTargetSerializer(instance, data=data)
+        self.assertTrue(serializer.is_valid())
+        obj = serializer.save()
+
+        # Ensure target_source 1 is deleted, and everything else is as
+        # expected.
+        queryset = OneToManyTarget.objects.all()
+        serializer = OneToManyTargetSerializer(queryset)
+        expected = [
+            {'id': 1, 'name': u'target-1', 'target_sources': [{'id': 1, 'name': u'target-source-1', 'sources': [{'id': 1, 'name': u'source-1'}, {'id': 2, 'name': u'source-2'}]}]}
+            ]
+        self.assertEquals(serializer.data, expected)
+
+
 class NestedOneToOneTests(TestCase):
     def setUp(self):
         for idx in range(1, 4):
@@ -54,10 +171,9 @@ class NestedOneToOneTests(TestCase):
         expected = [
             {'id': 1, 'name': u'target-1', 'target_source': {'id': 1, 'name': u'target-source-1', 'source': {'id': 1, 'name': u'source-1'}}},
             {'id': 2, 'name': u'target-2', 'target_source': {'id': 2, 'name': u'target-source-2', 'source': {'id': 2, 'name': u'source-2'}}},
-            {'id': 3, 'name': u'target-3', 'target_source': {'id': 3, 'name': u'target-source-3', 'source': {'id': 3, 'name': u'source-3'}}}            
+            {'id': 3, 'name': u'target-3', 'target_source': {'id': 3, 'name': u'target-source-3', 'source': {'id': 3, 'name': u'source-3'}}}
         ]
         self.assertEquals(serializer.data, expected)
-        
 
     def test_one_to_one_create(self):
         data = {'id': 4, 'name': u'target-4', 'target_source': {'id': 4, 'name': u'target-source-4', 'source': {'id': 4, 'name': u'source-4'}}}

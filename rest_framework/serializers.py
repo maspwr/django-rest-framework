@@ -284,8 +284,18 @@ class BaseSerializer(WritableField):
         Deserialize primitives -> objects.
         """
         if hasattr(data, '__iter__') and not isinstance(data, dict):
-            # TODO: error data when deserializing lists
-            return [self.from_native(item, None) for item in data]
+            self._siblings = []
+            self._errors = []
+            if self.object is not None and (not hasattr(self.object, '__iter__') or isinstance(self.object, dict)):
+                self._errors = {'non_field_errors': [u'Invalid data']}
+                return None
+            for idx, item in enumerate(data):
+                sibling = copy.deepcopy(self)                
+                sibling.object = self.object[idx] if self.object else None
+                self._siblings.append(sibling)
+                sibling.object = sibling.from_native(item, None)
+                self._errors.append(sibling._errors)
+            return [sibling.object for sibling in self._siblings]
 
         self._errors = {}
         if data is not None or files is not None:
@@ -337,7 +347,7 @@ class BaseSerializer(WritableField):
         return self._errors
 
     def is_valid(self):
-        return not self.errors
+        return not any(self.errors)
 
     @property
     def data(self):
@@ -387,14 +397,26 @@ class ModelSerializer(Serializer):
         if self.parent.object:
             # Set the serializer object if it exists
             pk_field_name = self.opts.model._meta.pk.name
-            pk_val = native.get(pk_field_name)
-            obj = getattr(self.parent.object, field_name)
-            if obj and (getattr(obj, pk_field_name) == pk_val):
-                self.object = obj
-                self.delete = native.get('_delete')
+            if hasattr(native, '__iter__') and not isinstance(native, dict):
+                self.object = []
+                for item in native: 
+                    pk_val = item.get(pk_field_name)
+                    rel = getattr(self.parent.object, field_name)
+                    obj = rel.get(pk=pk_val)
+                    if obj:
+                        self.object.append(obj)
+                        self.delete = item.get('_delete')
+                    else:
+                        self.object.append(None)
+            else:
+                pk_val = native.get(pk_field_name)
+                obj = getattr(self.parent.object, field_name)
+                if obj and (getattr(obj, pk_field_name) == pk_val):
+                    self.object = obj
+                    self.delete = native.get('_delete')
 
         obj = self.from_native(native, files)
-        if not self._errors:
+        if not any(self._errors):
             self.object = obj
             into[self.source or field_name] = self
         else:
@@ -571,6 +593,11 @@ class ModelSerializer(Serializer):
         return instance
 
     def _save(self, parent=None, fk_field=None):
+        if hasattr(self.object, '__iter__'):
+            for sibling in self._siblings:
+                sibling._save(parent=parent, fk_field=fk_field)
+            return
+
         if self.delete:
             self.object.delete()
             return
@@ -592,7 +619,7 @@ class ModelSerializer(Serializer):
                 else:
                     setattr(self.object, accessor_name, object_list)
             self.related_data = {}
-            
+
     def save(self):
         """
         Save the deserialized object and return it.
