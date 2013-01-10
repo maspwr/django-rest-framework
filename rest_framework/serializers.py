@@ -107,7 +107,6 @@ class BaseSerializer(WritableField):
         self.parent = None
         self.root = None
         self.partial = partial
-        self.delete = False
 
         self.context = context or {}
 
@@ -119,6 +118,8 @@ class BaseSerializer(WritableField):
         self._data = None
         self._files = None
         self._errors = None
+        self._instance = instance
+        self._delete = {}
 
     #####
     # Methods to determine which fields to use when (de)serializing objects.
@@ -284,18 +285,24 @@ class BaseSerializer(WritableField):
         Deserialize primitives -> objects.
         """
         if hasattr(data, '__iter__') and not isinstance(data, dict):
-            self._siblings = []
             self._errors = []
             if self.object is not None and (not hasattr(self.object, '__iter__') or isinstance(self.object, dict)):
                 self._errors = {'non_field_errors': [u'Invalid data']}
                 return None
+            objects = []
+            errors = []
+            m2m_data = []
+            related_data = []
             for idx, item in enumerate(data):
-                sibling = copy.deepcopy(self)                
-                sibling.object = self.object[idx] if self.object else None
-                self._siblings.append(sibling)
-                sibling.object = sibling.from_native(item, None)
-                self._errors.append(sibling._errors)
-            return [sibling.object for sibling in self._siblings]
+                self._instance = self.object[idx] if self.object else None
+                objects.append(self.from_native(item, files))
+                errors.append(self._errors)
+                m2m_data.append(self.m2m_data)
+                related_data.append(self.related_data)
+            self._errors = errors
+            self.m2m_data = m2m_data
+            self.related_data = related_data
+            return objects
 
         self._errors = {}
         if data is not None or files is not None:
@@ -305,7 +312,7 @@ class BaseSerializer(WritableField):
             self._errors['non_field_errors'] = ['No input provided']
 
         if not self._errors:
-            return self.restore_object(attrs, instance=getattr(self, 'object', None))
+            return self.restore_object(attrs, instance=getattr(self, '_instance', None))
 
     def field_to_native(self, obj, field_name):
         """
@@ -394,26 +401,30 @@ class ModelSerializer(Serializer):
                 raise ValidationError(self.error_messages['required'])
             return
 
-        if self.parent.object:
+        if self.parent._instance:
             # Set the serializer object if it exists
             pk_field_name = self.opts.model._meta.pk.name
             if hasattr(native, '__iter__') and not isinstance(native, dict):
                 self.object = []
                 for item in native: 
                     pk_val = item.get(pk_field_name)
-                    rel = getattr(self.parent.object, field_name)
-                    obj = rel.get(pk=pk_val)
+                    rel = getattr(self.parent._instance, field_name)
+                    try:
+                        obj = rel.get(pk=pk_val)
+                    except ObjectDoesNotExist:
+                        obj = None
                     if obj:
                         self.object.append(obj)
-                        self.delete = item.get('_delete')
+                        self._delete[pk_val] = item.get('_delete')
                     else:
                         self.object.append(None)
             else:
                 pk_val = native.get(pk_field_name)
-                obj = getattr(self.parent.object, field_name)
+                obj = getattr(self.parent._instance, field_name)
                 if obj and (getattr(obj, pk_field_name) == pk_val):
                     self.object = obj
-                    self.delete = native.get('_delete')
+                    self._instance = obj
+                    self._delete[pk_val] = native.get('_delete')
 
         obj = self.from_native(native, files)
         if not any(self._errors):
@@ -592,13 +603,16 @@ class ModelSerializer(Serializer):
 
         return instance
 
-    def _save(self, parent=None, fk_field=None):
+    def _save(self, parent=None, fk_field=None, m2m_data=None, related_data=None):
         if hasattr(self.object, '__iter__'):
-            for sibling in self._siblings:
-                sibling._save(parent=parent, fk_field=fk_field)
+            objects = self.object
+            for idx, obj in enumerate(objects):
+                self.object = obj
+                self._save(parent=parent, fk_field=fk_field, m2m_data=m2m_data[idx], related_data=related_data[idx])
+            self.object = objects
             return
 
-        if self.delete:
+        if self.object.id and self._delete.get(self.object.id):
             self.object.delete()
             return
 
@@ -606,25 +620,25 @@ class ModelSerializer(Serializer):
             setattr(self.object, fk_field, parent)
         self.object.save()
 
-        if getattr(self, 'm2m_data', None):
-            for accessor_name, object_list in self.m2m_data.items():
+        if m2m_data:
+            for accessor_name, object_list in m2m_data.items():
                 setattr(self.object, accessor_name, object_list)
-            self.m2m_data = {}
 
-        if getattr(self, 'related_data', None):
-            for accessor_name, object_list in self.related_data.items():
+        if related_data:
+            for accessor_name, object_list in related_data.items():
                 if isinstance(object_list, ModelSerializer):
                     fk_field = self.object._meta.get_field_by_name(accessor_name)[0].field.name
-                    object_list._save(parent=self.object, fk_field=fk_field)
+                    object_list._save(parent=self.object, fk_field=fk_field, m2m_data=object_list.m2m_data, related_data=object_list.related_data)
                 else:
                     setattr(self.object, accessor_name, object_list)
-            self.related_data = {}
 
     def save(self):
         """
         Save the deserialized object and return it.
         """
-        self._save()
+        self._save(m2m_data=self.m2m_data, related_data=self.related_data)
+        self.m2m_data = {}
+        self.related_data = {}
         return self.object
 
 
