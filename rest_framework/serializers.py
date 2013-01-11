@@ -297,8 +297,8 @@ class BaseSerializer(WritableField):
                 self._instance = self.object[idx] if self.object else None
                 objects.append(self.from_native(item, files))
                 errors.append(self._errors)
-                m2m_data.append(self.m2m_data)
-                related_data.append(self.related_data)
+                m2m_data.append(getattr(self, 'm2m_data', None))
+                related_data.append(getattr(self, 'related_data', None))
             self._errors = errors
             self.m2m_data = m2m_data
             self.related_data = related_data
