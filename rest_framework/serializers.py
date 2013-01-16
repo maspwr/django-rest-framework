@@ -290,8 +290,8 @@ class BaseSerializer(WritableField):
                 self._errors = {'non_field_errors': [u'Invalid data']}
                 return None
             for idx, item in enumerate(data):
-                sibling = copy.deepcopy(self)                
-                sibling.object = self.object[idx] if self.object else None
+                obj = self.object[idx] if self.object else None
+                sibling = self.__class__(obj, data=item)
                 self._siblings.append(sibling)
                 sibling.object = sibling.from_native(item, None)
                 self._errors.append(sibling._errors)
@@ -299,6 +299,11 @@ class BaseSerializer(WritableField):
 
         self._errors = {}
         if data is not None or files is not None:
+            if data.get('_delete'):
+                # No reason to deserialize the object if we are
+                # deleting it.
+                self.delete = True
+                return self.object
             attrs = self.restore_fields(data, files)
             attrs = self.perform_validation(attrs)
         else:
@@ -399,13 +404,15 @@ class ModelSerializer(Serializer):
             pk_field_name = self.opts.model._meta.pk.name
             if hasattr(native, '__iter__') and not isinstance(native, dict):
                 self.object = []
-                for item in native: 
+                for item in native:
                     pk_val = item.get(pk_field_name)
                     rel = getattr(self.parent.object, field_name)
-                    obj = rel.get(pk=pk_val)
+                    try:
+                        obj = rel.get(pk=pk_val)
+                    except ObjectDoesNotExist:
+                        obj = None
                     if obj:
                         self.object.append(obj)
-                        self.delete = item.get('_delete')
                     else:
                         self.object.append(None)
             else:
@@ -413,7 +420,6 @@ class ModelSerializer(Serializer):
                 obj = getattr(self.parent.object, field_name)
                 if obj and (getattr(obj, pk_field_name) == pk_val):
                     self.object = obj
-                    self.delete = native.get('_delete')
 
         obj = self.from_native(native, files)
         if not any(self._errors):
@@ -599,7 +605,8 @@ class ModelSerializer(Serializer):
             return
 
         if self.delete:
-            self.object.delete()
+            if self.object.id:
+                self.object.delete()
             return
 
         if parent and fk_field:
