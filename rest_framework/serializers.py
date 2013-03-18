@@ -605,7 +605,7 @@ class ModelSerializer(Serializer):
             return
 
         if self.delete:
-            if self.object.id:
+            if getattr(self.object, 'id', None) is not None:
                 self.object.delete()
             return
 
